@@ -1,0 +1,61 @@
+﻿#pragma once
+// directory and file handling functions
+#include "stdafx.h"
+
+#include <vector>
+#include <string>
+#include <iostream>
+
+
+#ifdef __linux__
+	#define PATH_DELIMITER L('/')
+#else
+	#define PATH_DELIMITER L('\\')
+#endif
+
+typedef std::vector<STRING> STRINGLIST;
+struct SA_FILE_RECORD 
+{
+	STRING path, name;
+	unsigned attrib = 0;
+	time_t time_create = 0, 
+		   time_access = 0, 
+		   time_write = 0;
+	_fsize_t size;
+	SA_FILE_RECORD() {}
+	SA_FILE_RECORD & operator=(const _tfinddata_t &tf)
+	{
+		name = tf.name;
+		attrib = tf.attrib;
+		time_create = tf.time_create;
+		time_access = tf.time_access;
+		time_write  = tf.time_write;
+
+		return *this;
+	}
+};
+typedef std::vector<SA_FILE_RECORD> SAFILELIST;
+
+class SA_FILES
+{
+	bool _regexpMatch = false;
+	SAFILELIST _slFiles;	// from paths added by Add()
+
+	STRING _NormalizePath(STRING &s, bool isDir = false);	// replaces '\\' with '/'
+	STRING _NativePath(STRING s) const;		// expects normalized path, returns one with OS dtDelimiters
+	STRING _Name(STRING s) const;				// part of _path after the last dtDelimiter
+	STRING _Path(STRING s) const;				// path of file name in _path
+	bool _isRegex(STRING s);
+	bool _match(SA_FILE_RECORD &file, STRING pattern, bool &ok);		// ok: reg. expression was OK ?
+public:
+	SA_FILES() {}
+	virtual ~SA_FILES() {}
+
+	void SetRegexpMatch() { _regexpMatch = true; }
+	int Add(STRING path, bool isDir = false);
+	STRING Path(size_t which) const;	// which-th name w.o. ending dtDelimiter
+	STRING File(size_t which) const;	// which-th name w.o. path
+	STRING Name(size_t which) const;	// full path name for the which-th file
+
+	int Count() const { return (int)_slFiles.size(); }
+};

@@ -1,0 +1,245 @@
+#include "stdafx.h"
+
+#include <iostream>
+#include <iomanip>
+#include <fstream>
+
+#include <regex>
+
+#include "safiles.h"
+
+#include <filesystem>
+
+#ifdef _MSC_VER
+	#include <Windows.h>
+	#include <WinBase.h>
+	#include <fileapi.h>	// GetFileTime
+	#include <io.h>
+
+	#include <dos.h>
+	#include <direct.h>
+#endif
+
+using namespace std;
+
+/*==========================================================
+ * TASK: add file names for pattern to list of files
+ * EXPECTS:  'path' file name that may contain OS specific or
+ *				ECMASCRIPT patterns
+ *			'isDir': if this is not a file, but a directory name
+ *				 this may be imlpicit when 'path' ends with a '/'
+ *			'_regexpMatch' : if set before calling this function
+ *				then 'path' contains a rehular expression
+ * RETURNS: count of files added
+ * REMARKS: - file path is normalized to internal representation
+ *			   where path delimiter is a '/'
+ *			- if path is a directory path then it may not contain
+ *            a regular expression, therefore '_regexpMatch' is  
+ *			  temporarily reset to false and name is matched for
+ *			  all files in that directory except hidden, system or
+ *			  sub-directory names
+ *-------------------------------------------------------- */
+int SA_FILES::Add(STRING path, bool isDir)
+{
+	_NormalizePath(path, isDir);
+	if (path[path.length() - 1] == '/')
+		isDir = true;
+	bool _saved_regexpMatch = _regexpMatch;
+
+	if (isDir)						// then find all files in dir
+	{
+		_regexpMatch = false;
+			path += L(".*");
+	}
+	STRING p = path;				// name to search for in directory
+	STRING pat;						// regular expression pattern in file name
+		// look for regular expressions
+	if (_regexpMatch && _isRegex(p))	// not simply a file name or normal OS name pattern
+	{
+		pat = _Name(path);			// then separate pattern (otherwise it is empty)
+		p = _Path(path) + L('*');	// and set mask to get all files to test against pattern
+	}
+
+#ifdef _MSC_VER
+	struct _tfinddata_t ft;
+	SA_FILE_RECORD saft;
+	saft.path = _Path(path);
+	if(!saft.path.empty() && saft.path[ saft.path.length()-1] != '/')
+		saft.path += L("/");
+
+	intptr_t handle;
+	bool ok = true;
+	int count = Count();	// of file path names added before this run
+	if ((handle = _tfindfirst(p.c_str(), &ft)) != -1)
+	{
+		saft = ft;
+		if( ((ft.attrib & (_A_SUBDIR | _A_SYSTEM | _A_HIDDEN)) == 0) &&	// only get normal files in directory
+				_match(saft, pat, ok) )									// and if match then
+			_slFiles.push_back(saft);
+		if (!ok)	// bad regular expression	do not continue
+			return 0;
+
+		while (!_tfindnext(handle, &ft))
+		{
+			saft = ft;
+			if (((ft.attrib & (_A_SUBDIR | _A_SYSTEM | _A_HIDDEN)) == 0) &&	// only get normal files in directory
+				_match(saft, pat, ok))									// and if match then
+				_slFiles.push_back(saft);
+			if (!ok)	// bad regular expression	do not continue
+				return 0;
+		}
+	}
+	_findclose(handle);
+#endif
+	_regexpMatch = _saved_regexpMatch;		// restore
+
+	return Count() - count;	// count of file path names added in this run
+}
+
+/*==========================================================
+* TASK: change OS specific path separator charaters to
+ *		'/'
+ * EXPECTS: 'str': path
+ *			'isDir' : this is a direcory. add '/' to the
+ *					end of path is necessary
+ * RETURNS: the modified string which is the same variable 
+ *			as the original
+ *-------------------------------------------------------- */
+STRING SA_FILES::_NormalizePath(STRING &str, bool isDir)
+{
+	for (size_t i = 0; i != str.length(); ++i)
+		if (str[i] == PATH_DELIMITER)
+			str[i] = L('/');
+	if (isDir && str[str.length() - 1] != L('/'))
+		str += L("/");
+	return str;
+}
+
+/*==========================================================
+* TASK:	   convert '/' characters to OS specific path delimiter
+* EXPECTS:	'str' : path in internal representation
+* RETURNS:	another string with OS path delimiters
+*-------------------------------------------------------- */
+STRING SA_FILES::_NativePath(STRING str) const		// expects normalized path, returns one with OS delimiters
+{
+	TCHAR chPrev = 0;
+	if (PATH_DELIMITER != L('/'))
+	{
+		for (size_t i = 0; i != str.length(); ++i)
+		{
+			if (str[i] == L('/') && chPrev != '\\')
+				str[i] = PATH_DELIMITER;
+			chPrev = str[i];
+		}
+	}
+	return str;
+}
+
+/*==========================================================
+* TASK:	  get file name
+* EXPECTS:	s - full normalized path name of file
+* RETURNS:	file name w.o. the path
+*-------------------------------------------------------- */
+STRING SA_FILES::_Name(STRING s)	const					
+{
+	if (s.empty())
+		return s;
+	size_t pos = s.find_last_of(L('/'));
+	if (pos == s.npos)
+		return s;
+	else
+		return s.substr(pos + 1);
+}
+
+/*==========================================================
+* TASK:	get file path
+* EXPECTS: s - full normalized path name of file
+* RETURNS: file path ending with '/'
+*-------------------------------------------------------- */
+STRING SA_FILES::_Path(STRING s) const						// path of file name in _path
+{
+	if (s.empty())
+		return s;
+	size_t pos = s.find_last_of(L('/'));
+	if (pos == s.npos)
+		return STRING();
+	else
+		return s.substr(0, pos);		// including '/' at the end
+}
+
+/*==========================================================
+* TASK:	check if an expression is a real regexp
+* EXPECTS: s - any string
+* RETURNS: if any of the following characters are found in string
+*			'\','[','{','..','^','$','?'
+*-------------------------------------------------------- */
+bool SA_FILES::_isRegex(STRING s)
+{
+	REGEX r(L("\\[|\\{|\\*|\\.\\.|\\^|\\$|\\?"));
+	return regex_search(s,r);
+}
+
+/*==========================================================
+ * TASK: match a file name against a mask 
+ * EXPECTS: name: is file name
+ *		    pattern: ECMASCRIPT regular expression pattern
+ *          ok : pattern is a valid reg. expr.
+ * RETURNS: true if pattern exactly matches the pattern
+ *-------------------------------------------------------- */
+bool SA_FILES::_match(SA_FILE_RECORD &file, STRING pattern, bool &ok)		// ok: reg. expression was OK ?
+{
+	ok = true;
+	if (pattern.empty())	// then file name was already the good for the pattern
+		return true;
+
+	try
+	{
+		REGEX r(pattern);
+		return regex_match(file.name, r);		// default behavior (no 3rd argument)
+	}
+	catch(std::regex_error& e)
+	{
+		CERR << L("Error in regular expression \"") + pattern + L(")");
+		ok = false;
+	}
+	return false;
+}
+
+/*==========================================================
+ * TASK: get path from list
+ * EXPECTS:	which - index of full path name in _slFiles
+ * RETURNS: path of which-th name w.o. ending delimiter
+ *-------------------------------------------------------- */
+STRING SA_FILES::Path(size_t which) const	
+{
+	if (which >= _slFiles.size())
+		return STRING();
+	STRING s = _slFiles[which].path;
+	return _NativePath(s);
+}
+
+/*==========================================================
+ * TASK: get file name from list
+ * EXPECTS:	which - index of full path name in _slFiles
+ * RETURNS: file name of which-th path 
+ *-------------------------------------------------------- */
+STRING SA_FILES::File(size_t which) const	// which-th name w.o. path
+{
+	if (which >= _slFiles.size())
+		return STRING();
+	return _slFiles[which].name;
+}
+
+/*==========================================================
+ * TASK:	get full path name
+ * EXPECTS: which - index of full path name in _slFiles
+ * RETURNS: full path name of which-th path 
+*-------------------------------------------------------- */
+STRING SA_FILES::Name(size_t which) const	// full path name for the which-th file
+{
+	STRING s;
+	if (which >= _slFiles.size())
+		return s;
+	s = _slFiles[which].path + _slFiles[which].name;		// full name
+	return _NativePath(s);
+}

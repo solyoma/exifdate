@@ -1,0 +1,378 @@
+﻿// exifdate.cpp : Defines the entry point for the console application.
+//
+//---------------------------------------------------------------------------
+#include "stdafx.h"
+#include "targetver.h"
+#include "exifdate.h"
+#include "safiles.h"
+
+using namespace std;
+
+EXIF_DATE edate;
+
+//---------------------------------------------------------------------------
+/*
+--------------------- DATETIMESHIFT class --------
+*/
+
+int DateTimeShift::cumdays[2][13] = {		 // cumulative days in year for normal and leap years
+	{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365 },
+	{ 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366 }
+};
+
+
+/*================================================================
+ * TASK:	check date
+ * EXPECTS: date is set
+ * RETURNS: true if date is between 2000.01.01 and 2100.12.12
+ *		   false otherwise
+ * REMARKS:	datee may be invalid, but still usable when relative
+ *----------------------------------------------------------------*/
+bool  DateTimeShift::DateValid()
+{
+	static int mdays[2][13] = {
+		{ 0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 },
+		{ 0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+	};
+	bool invalid = _y < 2000 || _y  > 2100 || _m < 1 || _m > 12 || _d < 1 || _d > mdays[IsLeapYear()][_m];
+	return !invalid;
+}
+/*================================================================
+ * TASK:	check time
+ * EXPECTS: time set
+ * RETURNS: time is between 0:0:0 and 23:59:59
+ * REMARKS: time may be invalid, but still usable when relative
+ *----------------------------------------------------------------*/
+bool DateTimeShift::TimeValid()
+{
+	return !(_h < 0 || _h > 23 || _n < 0 || _n >59 || _s < 0 || _s > 59);
+}
+
+/*================================================================
+* TASK:		add two date & time
+* EXPECTS:	sh - the other
+* RETURNS:	*this
+* REMARKS:	Date and time may be absolute or relative (signed)
+*----------------------------------------------------------------*/
+DateTimeShift& DateTimeShift::operator+=(DateTimeShift sh)
+{
+	ToSec();
+	sh.ToSec();
+	_sec += sh._sec;
+	FromSec();
+	return *this;
+}
+
+/*================================================================
+* TASK:
+* EXPECTS:
+* RETURNS:
+* REMARKS: sets seconds as not calculated
+*----------------------------------------------------------------*/
+DateTimeShift& DateTimeShift::operator=(const DateTimeShift sh)
+{
+	if (sh._setDate)
+	{
+		_y = sh._y;
+		_m = sh._m;
+		_d = sh._d;
+	}
+	if (sh._setTime)
+	{
+		_h = sh._h;
+		_n = sh._n;
+		_s = sh._s;
+	}
+	_secIsOk = false;
+	return *this;
+}
+/*================================================================
+ * TASK: convert date & time to signed seconds
+ * EXPECTS: 
+ * RETURNS:	nothing, sets '_sec' and '_secIsOk'
+ * REMARKS: - date & time may be absolute (2000.01.01 00:00:00 .. 2100.12.12 23:59:59)
+ *				or relative ( abs(_y) < 2000)
+ *----------------------------------------------------------------*/
+void DateTimeShift::ToSec()	
+{				// Expects all values that are set are valid
+	// but they need not be set (may be 0)
+	if (_secIsOk)	// already calculated
+		return;
+
+	int prevm = (_m ? (_m == 1 ? 12 : _m) : 0);
+	int days_till_this_month = 0;
+	if (prevm != 12)	// prev year
+		days_till_this_month = cumdays[IsLeapYear()][prevm]; // days from 01.01 in this year
+
+	// seconds up to this month w.o. leap years
+	// days are tricky, because for absolute dates _d-1 must be used (200.01.01 means 0 seconds for this day)
+	// while in offsets d is the number of whole days in the offset
+	_sec = (long long)_s +					// sec
+		     60L * (long long)_n + 			// min
+		   3600L * (long long)_h + 			// hour
+		  86400L * ((long long)(_d ? (_y > 2000 ? _d - 1 : _d) : 0) + days_till_this_month) + // days
+		  (_y > 2000 ? (_y - 2000) : _y) * 365L * 86400L;	// year since 2000 or 0
+	if (_y > 2000)	// absolute year add leap seconds
+	{
+		int y = _y - 2000;
+		// how many leap years since 2000
+		int cntLeapDays = y / 4 - y / 100 + y / 400 + 1;	// +1 <= 2000 was a leap year
+		_sec += (cntLeapDays)* 86400L;
+	}
+
+	_secIsOk = true;
+}
+
+void DateTimeShift::FromSec()
+{
+	if (!_secIsOk)	// nothing to do
+		return;
+
+	long long ss = _sec;
+	_s = (int)(ss % 60);
+	_n = (int)(ss /= 60) % 60;		// ss = minutes
+	_h = (int)(ss /= 60) % 24;	  	// ss = hours
+	_d = (int)(ss /= 24);			// ss - days
+
+	_y = (int)(_d / 365.2425);		// _d/(365 + 1⁄4 − 1⁄100 + 1⁄400)
+	_d -= (int)(_y * 365.2425);		// days in year
+	_y += 2000;						// base year
+	// get month
+	int leap = IsLeapYear();
+	_m = 0;
+	while (_d > cumdays[leap][_m + 1])
+	{
+		++_m;
+	}
+	_d -= cumdays[leap][_m];
+	++_m;
+}
+
+bool DateTimeShift::SetTime(STRING sT)
+{
+	if (sT.length() < 4 || sT.length() > 6)
+		return false;
+	_h = stoi(sT.substr(0, 2));
+	_n = stoi(sT.substr(2, 2));
+	if (sT.length() == 6)
+		_s = stoi(sT.substr(4, 2));
+	else
+		_s = 0;
+	if (!TimeValid())
+		return false;
+	return _setTime = true;
+}
+
+bool DateTimeShift::SetDate(STRING sD) // SD format: YYYYMMDD[HHmm[SS]
+{
+	if (sD.length() < 8 || sD.length() > 14)
+		return false;
+
+	_y = stoi(sD.substr(0, 4));
+	_m = stoi(sD.substr(4, 2));
+	_d = stoi(sD.substr(6, 2));
+	if (!DateValid())
+		return false;
+	_setDate = true;
+	if (sD.length() == 8)	// no time is set
+		return true;
+	return SetTime(sD.substr(8));
+}
+
+/*----------- ModDate class ------ */
+
+int ModDate::ReadImageFile() // whole file into memory. return 0 if OK, < 0 if error
+{
+	if (pbuf != nullptr)		// already read in
+		return 0;
+
+	int pos = name.find_last_of('.');
+
+	newname = name.substr(0, pos) + L("X") + name.substr(pos);
+#ifdef _MSC_VER
+	HANDLE h;
+	h = CreateFile(name.c_str(), GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	if (h == INVALID_HANDLE_VALUE)
+	{
+		DWORD le = GetLastError();
+		STRING s;
+		// Display the error message and exit the process
+		if(le == ERROR_FILE_NOT_FOUND || le == ERROR_PATH_NOT_FOUND)
+			s = L("File not found");
+		else 
+			s = L("Invalid parameter");
+		CERR << s << L(" error opening file '") << name << L("'. Quiting\n");
+		return -1;
+	}
+	else
+	{
+		fileTimesOk = GetFileTime(h, &create, &lasta, &lastw) != 0;
+		DWORD high;
+		size = GetFileSize(h, &high);
+		CloseHandle(h);
+		if (high)
+		{
+			CERR << L("File '") << name << L("' is too large! It will not be processed!\n");
+			return -1;
+		}
+	}
+#else
+	struct _stat st;
+	if (_wstat(name.c_str(), &st))
+	{
+		STRING s;
+		if (errno == ENOENT)
+			s = L("File not found");
+		else if (errno == EINVAL)
+			s = L("Invalid parameter");
+		CERR << s << L(" error opening file '") << name << L("'. Quiting\n");
+		return -1;
+	}
+	size = st.st_size;
+
+	// read all of file in memory
+#endif
+	ifstream ifs(name.c_str(), ios_base::binary);		// original file
+	pbuf = new char[size];	// size must be smaller than 4 Gig!
+	pose = pbuf + (size - 14);	// need at least 14 bytes for date, so no need to look after this
+	bool ok = !ifs.read(pbuf, size).fail();
+	if (!ok)	// error reading file
+	{
+		CERR << L("Error reading file '") << name << L("'. Qutiing\n");
+		return -2;
+	}
+	ifs.close();
+	return 0;
+}
+
+int ModDate::Modify(bool isSave)	// !isSave when only display original EXIF date but do not create new file
+{
+	int pos = name.find_last_of('.');
+
+	newname = name.substr(0, pos) + L("X") + name.substr(pos);
+
+	if (ReadImageFile() < 0)	// error
+		return -1;
+
+	int found = _Modify();
+	if (!found)
+	{
+		cerr << L("No EXIF date found in file.\n");
+		return -31;
+	}
+
+	if (!isSave)
+		return found;
+
+	ofstream ofs(newname.c_str(), ios_base::binary);	// new file
+	ofs.write(pbuf, size);			// first SIZE data: all file was read in!
+	bool isOk = ofs.good();			// write successfull
+	ofs.close();
+
+	STRING s = (name.substr(0, pos) + L("~") + name.substr(pos));
+	RENAME(name.c_str(), s.c_str());
+	RENAME(newname.c_str(), name.c_str());
+#ifdef _MSC_VER
+	HANDLE h;
+	h = CreateFile(name.c_str(), GENERIC_WRITE | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+	if (SetFileTime(h, &create, &lasta, &lastw) == 0)	// OK
+	{
+		CERR << "Error setting file time to'" << name << "'\n";
+	}
+	CloseHandle(h);
+#endif
+	if (!keepOld)
+	{
+		REMOVE(s.c_str());
+	}
+
+	return found;
+}
+bool ModDate::GetExifDate()
+{
+		ddelim = pos[4];
+		delim = pos[10];
+		ech = pos[19];
+		// 2015:03:09T05:56:33
+		if (pos[7] != ddelim || pos[13] != ':' || pos[16] != ':')
+			return false;
+		pos[4] = pos[7] = pos[10] = pos[13] = pos[16] = pos[19] = 0;
+
+		ped = (EXIF_DATE*)pos;
+		try
+		{
+			DateTimeShift edtshTmp;
+			edtshTmp._setDate = edtshTmp._setTime = true;
+			edtshTmp._y = stoi(ped->y);		// may throw out_of_range exception
+			edtshTmp._m = stoi(ped->m);
+			edtshTmp._d = stoi(ped->d);
+			edtshTmp._h = stoi(ped->h);
+			edtshTmp._n = stoi(ped->n);
+			edtshTmp._s = stoi(ped->s);
+			edtshTmp._secIsOk = false;	// recalculate
+			// restore because it may be not a date & time after all
+			pos[4] = pos[7] = ddelim;
+			pos[10] = delim;
+			pos[13] = pos[16] = ':';
+			pos[19] = ech;
+			if (edtshTmp.DateValid() && edtshTmp.TimeValid())
+			{
+				edtsh = edtshTmp;
+				return true;
+			}
+			else
+				return false;
+		}
+		catch (...)
+		{
+			return false;
+		}
+}
+
+void ModDate::_SetExifDate()
+{
+		sprintf(ped->buf, "%04d%c%02d%c%02d%c%02d:%02d:%02d", edtsh._y, ddelim, edtsh._m, ddelim, edtsh._d, delim, edtsh._h, edtsh._n, edtsh._s);
+		pos[19] = ech;
+}
+
+int ModDate::_Modify()	// find from pos in pb and modify it
+{
+		int found = 0;
+		pos = pbuf;
+		while (pos < pose - 5)
+		{
+			char ch = pos[4];
+
+			if ((ch == ':' || ch == '-') && pos[7] == ch && pos[13] == ':' && pos[16] == ':')	// YYYY:MM:DD HH:MM:SS
+			{																					//	   4  7	 10	13 16  19
+				if (GetExifDate())	// to edtsh and it is valid
+				{
+					if (ttsh._setDate || ttsh._setTime)		// set base date and/or time when needed 
+						edtsh = ttsh;						// before other modifications
+
+					edtsh += dtsh;			// modify by offsets set in dtsh
+					_SetExifDate();
+					pos += 20;
+					++found;
+				}
+				else
+				{
+					pos += 5;	// skip area where year info should be 
+				}
+			}
+			else
+				++pos;
+		}
+		return found;
+}
+
+
+// EXIF date output
+ostream &operator<<(ostream &os, const ModDate &md)
+{
+	os << "Exif Date from file: '" << md.name << "' "
+		<< md.edtsh._y << md.ddelim
+		<< setfill(L'0') << setw(2) << md.edtsh._m << md.ddelim << setw(2) << md.edtsh._d << " "
+		<< setw(2) << md.edtsh._h << ":" << setw(2) << md.edtsh._n << ":" << setw(2) << md.edtsh._s << endl;
+	return os;
+}

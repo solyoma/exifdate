@@ -1,0 +1,495 @@
+﻿// exifdate.cpp : Defines the entry point for the console application.
+//
+//---------------------------------------------------------------------------
+#include "stdafx.h"
+
+using namespace std;
+
+//---------------------------------------------------------------------------
+
+char szProgramName[144];
+char szProgramDir[144];
+
+/*======================================================================*/
+char *GetProgramName(char *pszPath)
+/*----------------------------------------------------------------------*/
+{
+	char *p;
+
+	strcpy(szProgramDir, pszPath);
+	p = strrchr(szProgramDir, '\\');
+	if (!p)
+		p = strrchr(szProgramDir, '/');
+	if (!p)
+		p = szProgramDir;
+	else
+		++p;
+	strncpy(szProgramName, p, strlen(p));
+	szProgramName[strlen(p)] = 0;
+	*p = 0;
+	return szProgramName;
+}
+/*======================================================================*/
+int Usage(char *pszName)
+/*----------------------------------------------------------------------*/
+{
+	cout << "Modifies the date stored in the EXIF header of JPG and RAW files\n"
+		"Usage: " << pszName << " [options] <single file name>\n"
+		" where options are:\n"
+		" -h: print this help\n"
+		" -b: keep original files for backup with a tilde appended to the original name\n"
+
+		" -t<date>[<time>]: set EXIF date (and optionally time). Format: YYYMMDD[HHMMSS]\n\n"
+
+		"Modification options:\n"
+		" -d<days to add \n"
+		" -D<days to subtract\n"
+		" -m<months to add>\n"
+		" -M<months to subtract>\n"
+		" -y<years to add>\n"
+		" -Y<years to subtract>\n"
+		" -o<hours to add>\n"
+		" -O<hours to subtract>\n"
+		" -n<minutes to add>\n"
+		" -N<minutes to subtract>\n"
+		" -s<seconds to add>\n\n"
+		" -S<seconds to subtract>\n\n"
+		"Only one modification option may be used!\n\n"
+
+		"<name> : full path name or relative name of file.\n"
+		"Example: " << pszName << " -b -t20150308 this\\path\\DSCN_1234.NEF\n"
+		"EXPECTS: the file contains date and time info (more than one position)\n" 
+		"        in one of the following ASCII formats:\n"
+		"		\"YYYY-MM-DDTHH:MM:SS\" or \"YYYY:MM:DD HH:MM:SS\"\n"
+		"(C) András Sólyom 2015-2016\n"
+		;
+	return(1);
+}
+
+int str2int(string s)
+{
+	stringstream ss;
+	ss << s;
+	int d;
+	ss >> d;
+	return d;
+}
+int pchar2int(char *p)
+{
+	char buf[3];
+	buf[0] = *p++;
+	buf[1] = *p++;
+	buf[2] = 0;
+	string s(buf);
+	return str2int(s);
+}
+
+string int2str(int d)
+{
+	string s;
+	stringstream ss;
+	ss << d;
+	ss >> s;
+	if (s.length() == 1)
+		s = '0' + s;
+	return s;
+}
+
+#pragma pack(push,1)
+////////////////////////////////
+union EXIF_DATE
+{
+	struct
+	{
+		char y[4],		// year
+			sep1,		// :
+			m[2],		// month
+			sep2,		// :
+			d[2],		// day
+			sep3,		// space or 'T'
+			h[2],		// hour
+			sep4,		// :
+			n[2],		// minute
+			sep5,		// :
+			s[2];		// second
+	};
+	char buf[20];
+} edate;
+#pragma pack(pop)	// back to default
+
+////////////////////////////////
+template <class T> T sa_abs(T a) { return (a > 0 ? a : -a); }
+class DateTimeShift
+{
+public:
+	// 0 for '_y'..'_s' means not set/no change, other values are +-
+	int _y = 0,	   // year 2000 ..
+		_m = 0,	   // month 1 .. 12
+		_d = 0,	   // day, 1 .. 31
+		_h = 0,	   // hour 0 .. 23
+		_n = 0,    // minute 0 .. 59
+		_s = 0;    // second 0 .. 59
+	int _leapy = 0;
+	bool _valid = false;
+
+	long long _sec=-1; // since 2000.01.01. 00:00:00
+	bool _keepOld = false;	// keep old files
+	bool _setDate = false;	// use data as new exif date (options -t)
+	bool _setTime = false;	// use time as new exif time (options -t)
+
+	int IsLeapYear() { int y = sa_abs(_y);  return y > 0 && ((y % 4) == 0) && ((y % 100 != 0) || (y % 400 == 0)); }
+
+	bool  DateValid()
+	{
+		static int mdays[2][13] = { 
+			{ 0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }, 
+			{ 0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 } 
+								  };
+		bool invalid = _y < 2000 || _y  > 2100 || _m < 1 || _m > 12 || _d < 1 || _d > mdays[IsLeapYear()][_m];
+		return !invalid;
+	}
+	bool TimeValid()
+	{
+		return !(_h < 0 || _h > 24 || _n < 0 || _n >59 || _s < 0 || _s > 59);
+	}
+
+	DateTimeShift& operator+=(DateTimeShift sh)
+	{
+//#if 1
+//		static int mdays[] = { 0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+//#else
+		ToSec();
+		sh.ToSec();
+		_sec += sh._sec;
+		FromSec();
+//#endif
+		return *this;
+	}
+	DateTimeShift& operator=(const DateTimeShift sh)
+	{
+		_y = sh._y;
+		_m = sh._m;
+		_d = sh._d;
+		if (sh._setTime)
+		{
+			_h = sh._h;
+			_n = sh._n;
+			_s = sh._s;
+		}
+		return *this;
+	}
+
+	void ToSec()	// calculate Date&Time to seconds since 2000
+	{				// Expects all values that are set are valid
+					// but they need not be set (may be 0)
+		if (_sec >= 0)	// already calculated
+			return;
+
+		int prevm = (_m ? (--_m == 0 ? 12 : _m) : 0);
+		static int cumdays[2][13] = {		 // cumulative days in year for normal and leap years
+			{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365 },
+			{ 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366 }
+									};
+		int days_till_this_month = 0;
+		if (prevm == 12)	// prev year
+			--_y;
+		else
+			days_till_this_month = cumdays[IsLeapYear()][prevm];
+
+		// seconds up to this month w.o. leap years
+		_sec = (long long)_s +					// sec
+			   60L * (long long)_n + 			// min
+			   3600L * (long long)_h + 			// hour
+			   86400L * ((long long)(_d ? _d-1 : 0) + days_till_this_month) + // days
+			   (_y > 2000 ? (_y - 2000) : _y) * 365L * 86400L;	// year since 2000 or 0
+		if (_y > 2000)
+		{
+			int y = _y - 2000;
+			// how many leap years since 2000
+			int cntLeapDays = y / 4 - y / 100 + y / 400 + 1;	// +1 <= 2000 was a leap year
+			_sec += (cntLeapDays) * 86400L;
+		}
+		if (prevm == 12)	// restore year
+			++_y;
+	}
+
+	void FromSec()
+	{
+		if (_sec < 0)	// nothing to do
+			return;
+
+		static int cumdays[2][13] = {		 // cumulative days in year for normal and leap years
+			{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365 },
+			{ 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366 }
+									};
+		long long ss = _sec;
+		_s = (int)(ss % 60);
+		_n = (int)(ss /= 60) % 60;		// ss = minutes
+		_h = (int)(ss /= 60) % 24;	  	// ss = hours
+		_d = (int)(ss /= 24);			// ss - days
+
+		_y = (int)(_d / 365.2425);		// _d/(365 + 1⁄4 − 1⁄100 + 1⁄400)
+		_d -= (int)(_y * 365.2425);		// days in year
+		_y += 2000;						// base year
+		// get month
+		int leap = IsLeapYear();
+		_m = 0;
+		while (_d > cumdays[leap][_m + 1])
+		{
+			++_m;
+		}
+		_d -= cumdays[leap][_m];
+		++_m;
+	}
+
+	bool SetDate(string sD) // SD format: YYYYMMDD or YYYYMMDDHHmmSS
+	{
+		if (sD.length() < 8 || sD.length() > 14)
+			return false;
+
+		_y = stoi(sD.substr(0, 4));
+		_m = stoi(sD.substr(4, 2));
+		_d = stoi(sD.substr(6, 2));
+		if (!DateValid())
+			return false;
+		_setDate = true;
+		if (sD.length() == 8)	// no time is set
+			return true;
+
+		_h = stoi(sD.substr( 8, 2));
+		_n = stoi(sD.substr(10, 2));
+		_s = stoi(sD.substr(12, 2));
+		if (!TimeValid())
+			return false;
+		return _setTime = true;
+	}
+};
+///////////////////////////
+class ModDate
+{
+public:
+	ModDate(string name, DateTimeShift sh) : name(name), dtsh(sh) { dtsh.ToSec(); keepOld = dtsh._keepOld; }
+	~ModDate() { delete[] pbuf; }
+
+	int ReadImageFile() // whole file into memory. return 0 if OK, < 0 if error
+	{
+		if (pbuf != nullptr)		// already read in
+			return 0;
+
+		int pos = name.find_last_of('.');
+
+		newname = name.substr(0, pos) + "X" + name.substr(pos);
+		struct stat st;
+		if (stat(name.c_str(), &st))
+		{
+			string s;
+			if (errno == ENOENT)
+				s = "File not found";
+			else if (errno == EINVAL)
+				s = "Invalid parameter";
+			cerr << s << " error opening file '" << name << "'. Quiting\n";
+			return -1;
+		}
+		// read all of file in memory
+		ifstream ifs(name.c_str(), ios_base::binary);		// original file
+		size = st.st_size;
+		pbuf = new char[size];
+		pose = pbuf + (size - 14);	// need at least 14 bytes for date, so no need to look after this
+		bool ok = !ifs.read(pbuf, size).fail();
+		if (!ok)	// error reading file
+		{	
+			cerr << "Error reading file '" << name << "'. Qutiing\n";
+			return -2;
+		}
+		ifs.close();
+		return 0;
+	}
+
+	int Modify(bool isSave = true)	// isTest when only display original EXIF date but do not create new file
+	{
+		int pos = name.find_last_of('.');
+
+		newname = name.substr(0, pos) + "X" + name.substr(pos);
+
+		ReadImageFile();
+
+		int found = _Modify();
+		if (!found)
+		{
+			cerr << "EXIF date not found.\n";
+			return -31;
+		}
+	
+		if (!isSave)
+			return found;
+
+		ofstream ofs(newname.c_str(), ios_base::binary);	// new file
+		ofs.write(pbuf, size);			// first SIZE data: all file was read in!
+
+		//ifs.close();
+		ofs.close();
+
+		string s = (name.substr(0, pos) + "~" + name.substr(pos));
+		rename(name.c_str(), s.c_str());
+		rename(newname.c_str(), name.c_str());
+		if (!keepOld)
+		{
+			remove(s.c_str());
+		}
+
+		return found;
+	}
+	friend ostream &operator<<(ostream &os, const ModDate &md);
+
+private:
+	DateTimeShift dtsh,	// modify exif date with this
+				  edtsh;	// from EXIF
+	string name, newname;
+	bool keepOld = false;
+	char *pbuf = nullptr,	// file data is read to here
+		*pos,   // in pbuf
+		*pose;  // points AFTER EOF in memory
+	int size;
+	char ddelim, // delimiter between date section (':' or '-') 
+		delim,	// delimiter between date and time: either space of 'T'
+		ech;	// character after exif date string
+
+	EXIF_DATE *ped = 0;
+
+	bool GetExifDate()
+	{
+		ddelim = pos[4];
+		delim = pos[10];
+		ech = pos[19];
+		// 2015:03:09T05:56:33
+		if (pos[7] != ddelim || pos[13] != ':' || pos[16] != ':')
+			return false;
+		pos[4] = pos[7] = pos[10] = pos[13] = pos[16] = pos[19] = 0;
+
+		ped = (EXIF_DATE*)pos;
+
+		edtsh._y = str2int(ped->y);
+		edtsh._m = str2int(ped->m);
+		edtsh._d = str2int(ped->d);
+		edtsh._h = str2int(ped->h);
+		edtsh._n = str2int(ped->n);
+		edtsh._s = str2int(ped->s);
+		edtsh._sec = -1;	// recalculate
+			// restore because it may be not a date & time after all
+		pos[4] = pos[7] = ddelim;
+		pos[10] = delim;
+		pos[13] = pos[16] = ':';
+		pos[19] = ech;
+		return  (edtsh.DateValid() && edtsh.TimeValid());
+	}
+
+	void _SetExifDate()
+	{
+		sprintf(ped->buf, "%04d%c%02d%c%02d%c%02d:%02d:%02d", edtsh._y, ddelim, edtsh._m, ddelim, edtsh._d, delim, edtsh._h, edtsh._n, edtsh._s);
+		pos[19] = ech;
+	}
+
+	int _Modify()	// find from pos in pb and modify it
+	{
+		int found = 0;
+		pos = pbuf;
+		while (pos < pose-5)
+		{
+			char ch = pos[4];
+
+			if ( (ch == ':' || ch == '-') && pos[7] == ch && pos[13] == ':' && pos[16] == ':')	// YYYY:MM:DD HH:MM:SS
+			{																					//	   4  7	 10	13 16  19
+				if (GetExifDate())	// to edtsh and it is valid
+				{
+					if (!dtsh._setDate)
+						edtsh += dtsh;
+					else
+						edtsh = dtsh;
+					_SetExifDate();
+					pos += 20;
+					++found;
+				}
+				else
+				{
+					pos += 5;	// skip area where year info should be 
+				}
+			}
+			else
+				++pos;
+		}
+		return found;
+	}
+};
+
+
+// EXIF date output
+ostream &operator<<(ostream &os, const ModDate &md)
+{
+	os << "Exif Date from file: '" << md.name << "' "
+		<< md.edtsh._y << md.ddelim 
+		<< setfill('0') << setw(2) << md.edtsh._m << md.ddelim << setw(2) << md.edtsh._d << " "
+		<< setw(2) << md.edtsh._h << ":" << setw(2) << md.edtsh._n << ":" << setw(2) << md.edtsh._s << endl;
+	return os;
+}
+
+
+
+/*======================================================================*/
+int main(int argc, char **argv)
+/*----------------------------------------------------------------------*/
+{
+	char *pszName = argv[0];
+	if (argc ==1 || (argc == 2 && *argv[1] == '-' && argv[1][1] == 'h'))
+		return Usage(GetProgramName(*argv));
+
+	string name;
+	DateTimeShift shift;
+	bool listDateAndTime = false;
+	while (--argc)
+	{
+		++argv;
+
+		if (argv[0][0] == '-')
+		{
+			switch (argv[0][1])
+			{
+				case 'D': shift._d = -str2int(argv[0] + 2); break;	// -days
+				case 'M': shift._m = -str2int(argv[0] + 2); break;	// -months
+				case 'N': shift._n = -str2int(argv[0] + 2); break;	// -minutes
+				case 'O': shift._h = -str2int(argv[0] + 2); break;	// -hours
+				case 'S': shift._s = -str2int(argv[0] + 2); break;	// -seconds
+				case 'Y': shift._y = -str2int(argv[0] + 2); break;	// -years
+
+				case 'b': shift._keepOld = true;			  break;
+
+				case 'd': shift._d = str2int(argv[0] + 2); break;	// +days
+				case 'h': return Usage(GetProgramName(*argv));
+				case 'l': listDateAndTime = true; break;
+				case 'm': shift._m = str2int(argv[0] + 2); break;	// +months
+				case 'n': shift._n = str2int(argv[0] + 2); break;	// +minutes
+				case 'o': shift._h = str2int(argv[0] + 2); break;	// +hours
+				case 's': shift._s = str2int(argv[0] + 2); break;	// +seconds
+				case 'y': shift._y = str2int(argv[0] + 2); break;	// +years
+				case 't': if (shift.SetDate(argv[0] + 2))
+								break;
+				default: return Usage(GetProgramName(*argv));
+			}
+		}
+		else
+			name = string(argv[0]);
+	}
+
+	ModDate modDate(name, shift);
+	int err;
+	if ((err = modDate.ReadImageFile()) != 0)	// then error
+		return err;
+
+	if (listDateAndTime)
+	{
+		modDate.Modify(false);	// do not write new file
+		cout << modDate;	// display EXIF date
+		return 0;
+	}
+
+	return modDate.Modify();
+}

@@ -1,0 +1,167 @@
+#include "stdafx.h"
+#include "targetver.h"
+#include "exifdate.h"
+#include "safiles.h"
+
+using namespace std;
+
+//---------------------------------------------------------------------------
+
+TCHAR szProgramName[144];
+TCHAR szProgramDir[144];
+
+/*======================================================================*/
+STRING GetProgramName(TCHAR *pszPath)
+/*----------------------------------------------------------------------*/
+{
+	STRING s = pszPath;
+	for (size_t i = 0; i < s.length(); ++i)
+		if (s[i] == '\\')
+			s[i] = '/';
+	return s;
+}
+
+
+/*======================================================================*/
+int Usage(STRING sName)
+/*----------------------------------------------------------------------*/
+{
+	COUT << sName << 
+//				   1         2		   3		 4		   5		 6		   7
+//       0123456789 123456789 123456789 123456789 123456789 123456789 123456789 123456789 
+		"EXIF date and time modifier V2.0 for image and sidecar (.xmp) files\n"
+		"Usage: " << sName << " [options] <file name> [<file name> [...] ]\n"
+		" where options are:\n"
+		" -h: print this help\n"
+		" -b: keep original files for backup with a tilde appended to the original name\n"
+		" -r: use regular expressions to match file name. Otherwise match with wildcards\n"
+		"     as usual under the OS\n"
+		" -l: only list modified dates but do not change the files\n\n"
+
+		"Modification options (date and time offsets):\n"
+		" -t<date>[<time>]: set EXIF date (and optionally time).\n"
+		"    Format: YYYMMDD[HHMM[SS]]\n"
+		" -tt<time>       : set EXIF time and leave date intact.\n"
+		"    Format: HHMM[SS]\n\n"
+		" -d<days to add \n"
+		" -D<days to subtract\n"
+		" -m<months to add>\n"
+		" -M<months to subtract>\n"
+		" -y<years to add>\n"
+		" -Y<years to subtract>\n"
+		" -o<hours to add>\n"
+		" -O<hours to subtract>\n"
+		" -n<minutes to add>\n"
+		" -N<minutes to subtract>\n"
+		" -s<seconds to add>\n\n"
+		" -S<seconds to subtract>\n\n"
+//				   1         2		   3		 4		   5		 6		   7
+//       0123456789 123456789 123456789 123456789 123456789 123456789 123456789 123456789 
+		"More than one modification option may be used at the same time.\n"
+		"When -y or -Y is used and the original or modified EXIF year is a leap year\n"
+		"   then the month and day will also change!"
+		"If an option occurs more than once the last one will be in effect.\n"
+		" Modification order: Option -t<> is applied first followed by the others.\n\n"
+		"<file name> : file path where the file name may contain a regular expression.\n"
+		"Example: " << sName << " -b -t20150308 this\\path\\*.NEF\n"
+		"EXPECTS: the file contains date and time info (maybe more than one position)\n"
+		"        in one of the following ASCII formats:\n"
+		"		\"YYYY-MM-DDTHH:MM:SS\" or \"YYYY:MM:DD HH:MM:SS\"\n"
+		"ALGORITHM: 1. Date and time given in option -t "
+		"           2. For offsets convert offset date and time to seconds.\n"
+		"           3. Read files in memory completely and scan for EXIF format\n"
+		"              date and time embedded in it. For all EXIF date and time found:\n"
+		"                3a. If -t is given replace EXIF date and/or time from it"
+		"                3b. Convert EXIF date and time to seconds elapsed since\n"
+		"                       2000.01.01. 00:00:00\n"
+		"                3c. Add offset seconds to EXIF seconds.\n"
+		"                3d. Convert EXIF seconds back to EXIF format date and time with\n"
+		"                    the correct delimiters and put them into the data in memory\n"
+		"                3e. If option -l is used the modified EXIF date is echoed in \n"
+		"                    terminal, else\n"
+		"                3f. Write new file to disk. If the write is not successfull\n" 
+		"                    leave original file intact. Otherwise either\n"
+		"                        - rename old file by adding a tilde (~) at the end\n"
+		"                          of the name (option -b)\n" 
+		"                        - or delete it from the disk\n"
+		"                     then rename new file to the original file name and set\n"
+		"                     the file dates to that of the original\n"
+		"(C) András Sólyom 2015-2016\n"
+		;
+//				   1         2		   3		 4		   5		 6		   7
+//       0123456789 123456789 123456789 123456789 123456789 123456789 123456789 123456789
+	return(1);
+}
+
+
+/*======================================================================*/
+int main(int argc, TCHAR **argv)
+/*----------------------------------------------------------------------*/
+{
+	TCHAR *pszName = argv[0];
+	if (argc == 1 || (argc == 2 && *argv[1] == '-' && argv[1][1] == 'h'))
+		return Usage(GetProgramName(*argv));
+
+	DateTimeShift	shift,		// from other options
+		shiftT;		// from option -t<>
+	bool listDateAndTime = false;
+
+	SA_FILES saFiles;
+
+	while (--argc)
+	{
+		++argv;
+		try
+		{
+			if (argv[0][0] == '-')
+			{
+				switch (argv[0][1])
+				{
+				case 'D': shift._d = -stoi(argv[0] + 2); break;	// -days
+				case 'M': shift._m = -stoi(argv[0] + 2); break;	// -months
+				case 'N': shift._n = -stoi(argv[0] + 2); break;	// -minutes
+				case 'O': shift._h = -stoi(argv[0] + 2); break;	// -hours
+				case 'S': shift._s = -stoi(argv[0] + 2); break;	// -seconds
+				case 'Y': shift._y = -stoi(argv[0] + 2); break;	// -years
+
+				case 'b': shift._keepOld = true;			  break;
+
+				case 'd': shift._d = stoi(argv[0] + 2); break;	// +days
+				case 'h': return Usage(GetProgramName(*argv));
+				case 'l': listDateAndTime = true; break;
+				case 'm': shift._m = stoi(argv[0] + 2); break;	// +months
+				case 'n': shift._n = stoi(argv[0] + 2); break;	// +minutes
+				case 'o': shift._h = stoi(argv[0] + 2); break;	// +hours
+				case 's': shift._s = stoi(argv[0] + 2); break;	// +seconds
+				case 'y': shift._y = stoi(argv[0] + 2); break;	// +years
+				case 't': if ((argv[0][2] == 't' && shift.SetTime(argv[0] + 3)) || (shiftT.SetDate(argv[0] + 2)))
+					break;
+				default: return Usage(GetProgramName(*argv));
+				}
+			}
+			else			// get all file names and process them each
+			{
+				saFiles.Add(STRING(argv[0]));		// get all files which matches the path to list
+			}
+		}
+		catch (...)
+		{
+			COUT << L("invalid modification parameters!\nExiting.\n");
+			return -1;
+		}
+	}
+
+	STRING name;
+	for (int i = 0; i < saFiles.Count(); ++i)
+	{
+		name = saFiles.Name(i);
+		ModDate modDate(name, shift, shiftT);
+		int err;
+		if ((err = modDate.ReadImageFile()) != 0)	// then error
+			return err;
+
+		modDate.Modify(!listDateAndTime);	// if listDateAndTime true do not write new file
+		COUT << modDate;		// display EXIF date
+	}
+	return 0;
+}
